@@ -9,11 +9,25 @@
 import UIKit
 import AVFoundation
 
-public class MMPlayerLayer: AVPlayerLayer {
+public class MMPlayerLayer: AVPlayerLayer, UIGestureRecognizerDelegate {
     lazy var tapGesture: UITapGestureRecognizer = {
         let g = UITapGestureRecognizer.init(target: self, action: #selector(MMPlayerLayer.touchAction(gesture:)))
         return g
     }()
+    
+    lazy var pinchGesture: UIPinchGestureRecognizer = {
+        let g = UIPinchGestureRecognizer.init(target: self, action: #selector(MMPlayerLayer.pinchAction(gesture:)))
+        g.delegate = self
+        return g
+    }()
+    
+    lazy var panGesture: UIPanGestureRecognizer = {
+        let g = UIPanGestureRecognizer.init(target: self, action: #selector(MMPlayerLayer.panAction(gesture:)))
+        //        g.minimumNumberOfTouches = 2
+        g.delegate = self
+        return g
+    }()
+    
     // prevent set frame frequently
     override public var frame: CGRect {
         set {
@@ -40,7 +54,7 @@ public class MMPlayerLayer: AVPlayerLayer {
         "duration",
         "playable",
         "hasProtectedContent",
-    ]
+        ]
     fileprivate var indicator = MMProgress()
     lazy var  bgView: UIView = {
         let v = UIView()
@@ -59,20 +73,28 @@ public class MMPlayerLayer: AVPlayerLayer {
             bgView.removeFromSuperview()
             self.removeFromSuperlayer()
             _playView?.removeGestureRecognizer(tapGesture)
+            _playView?.removeGestureRecognizer(pinchGesture)
+            _playView?.removeGestureRecognizer(panGesture)
         } didSet {
             guard let new = _playView else {
                 return
             }
-
+            
             new.addSubview(self.bgView)
             self.bgView.mPlayFit.layoutFitSuper()
             self.bgView.layoutIfNeeded()
             self.updateCoverConstraint()
             new.isUserInteractionEnabled = true
             new.addGestureRecognizer(tapGesture)
+            new.addGestureRecognizer(pinchGesture)
+            new.addGestureRecognizer(panGesture)
             new.layer.insertSublayer(self, at: 0)
         }
     }
+    
+    public var maxZoomLevel : CGFloat = 3.0
+    public var minZoomLevel : CGFloat = 1.0
+    
     public weak var mmDelegate: MMPlayerLayerProtocol?
     public var progressType: ProgressType = .default {
         didSet {
@@ -110,7 +132,7 @@ public class MMPlayerLayer: AVPlayerLayer {
                 self._playView = newValue
                 
                 if clearURLWhenChangeView && changeViewClearPlayer {
-                   self.playUrl = nil
+                    self.playUrl = nil
                 }
             }
         } get {
@@ -148,7 +170,7 @@ public class MMPlayerLayer: AVPlayerLayer {
         }
     }
     fileprivate var asset: AVURLAsset?
-
+    
     public var cacheType: MMPlayerCacheType = .none
     public var playUrl: URL? {
         willSet {
@@ -185,7 +207,7 @@ public class MMPlayerLayer: AVPlayerLayer {
                                 self?.cahce.appendCache(key: url, item: item)
                             default:
                                 self?.cahce.removeAll()
-
+                                
                             }
                             self?.player?.replaceCurrentItem(with: item)
                         }
@@ -194,10 +216,12 @@ public class MMPlayerLayer: AVPlayerLayer {
             }
         }
     }
-
+    
     public func setCoverView(enable: Bool) {
         self.coverView?.isHidden = !enable
         self.tapGesture.isEnabled = enable
+        self.pinchGesture.isEnabled = enable
+        self.panGesture.isEnabled = enable
     }
     
     fileprivate var isInitLayer = false
@@ -210,7 +234,7 @@ public class MMPlayerLayer: AVPlayerLayer {
     required public init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
     }
-
+    
     public override init() {
         super.init()
         self.setup()
@@ -246,7 +270,6 @@ public class MMPlayerLayer: AVPlayerLayer {
         }
     }
     public func replace(cover: UIView & MMPlayerCoverViewProtocol) {
-//    public func replace<T: UIView>(cover:T) where T: MMPlayerCoverViewProtocol{
         if let c = self.coverView ,c.isMember(of: cover.classForCoder) {
             c.alpha = 1.0
             return
@@ -278,13 +301,13 @@ public class MMPlayerLayer: AVPlayerLayer {
         self.playStatusBlock = state
         self.willPlayUrl = url
     }
-
+    
     public func stopLoading() {
         self.willPlayUrl = nil
     }
     
     public func startLoading() {
-
+        
         switch self.currentPlayStatus {
         case .playing , .pause:
             if self.playUrl == willPlayUrl {
@@ -467,6 +490,57 @@ public class MMPlayerLayer: AVPlayerLayer {
         return .unknown
     }
     
+    private var pinchStartTransform : CATransform3D = CATransform3DIdentity
+    private var panStartTransform : CATransform3D = CATransform3DIdentity
+    
+    
+    private var lastScale : CGFloat = 1.0
+    private var lastTranslate : CGPoint = CGPoint.zero
+    private var currentScale : CGFloat = 1.0
+    private var currentTranslate : CGPoint = CGPoint.zero
+    
+    @objc func pinchAction(gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            lastScale = gesture.scale
+        case .changed:
+            let scale = gesture.scale / lastScale
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.transform = CATransform3DScale(self.transform, scale, scale, scale)
+            currentScale *= scale
+            lastScale = gesture.scale
+            CATransaction.commit()
+        case .ended, .cancelled:
+            normalizeTransform()
+        case .possible, .failed:
+            break
+        }
+    }
+    
+    @objc func panAction(gesture: UIPanGestureRecognizer) {
+        var translatInSelf = gesture.translation(in: self.playView)
+        translatInSelf = translatInSelf.applying(CGAffineTransform.init(scaleX: 1/currentScale, y: 1/currentScale))
+        
+        switch gesture.state {
+        case .began:
+            lastTranslate = translatInSelf
+        case .changed:
+            let translate = CGPoint(x: translatInSelf.x - lastTranslate.x, y: translatInSelf.y - lastTranslate.y)
+            
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.transform = CATransform3DTranslate(self.transform, translate.x, translate.y, 0)
+            CATransaction.commit()
+            currentTranslate = CGPoint(x: currentTranslate.x + translate.x, y: currentTranslate.y + translate.y)
+            lastTranslate = translatInSelf
+        case .ended, .cancelled:
+            normalizeTransform()
+        case .possible, .failed:
+            break
+        }
+    }
+    
     @objc func touchAction(gesture: UITapGestureRecognizer) {
         switch self.currentPlayStatus {
         case .unknown:
@@ -482,7 +556,35 @@ public class MMPlayerLayer: AVPlayerLayer {
             mmDelegate?.touchInVideoRect(contain: self.videoRect.contains(point))
         }
     }
-
+    
+    private func normalizeTransform() {
+        if currentScale > maxZoomLevel {
+            currentScale = maxZoomLevel
+        } else if currentScale < minZoomLevel {
+            currentScale = minZoomLevel
+        }
+        
+        let maxXTranslate = ((self.playView?.bounds.width ?? 0) * (currentScale - 1)) / (2 * currentScale)
+        let minXTranslate = -maxXTranslate
+        let maxYTranslate = ((self.playView?.bounds.height ?? 0) * (currentScale - 1)) / (2 * currentScale)
+        let minYTranslate = -maxYTranslate
+        
+        if currentTranslate.x > maxXTranslate {
+            currentTranslate.x = maxXTranslate
+        } else if currentTranslate.x < minXTranslate {
+            currentTranslate.x = minXTranslate
+        }
+        
+        if currentTranslate.y > maxYTranslate {
+            currentTranslate.y = maxYTranslate
+        } else if currentTranslate.y < minYTranslate {
+            currentTranslate.y = minYTranslate
+        }
+        let scaledTransform = CATransform3DScale(CATransform3DIdentity, currentScale, currentScale, currentScale)
+        let translatedTransform = CATransform3DTranslate(scaledTransform, currentTranslate.x, currentTranslate.y, 0)
+        self.transform = translatedTransform
+    }
+    
     @objc public func showCover(isShow: Bool) {
         self.isCoverShow = isShow
         if isShow {
@@ -520,3 +622,15 @@ public class MMPlayerLayer: AVPlayerLayer {
         }
     }
 }
+
+
+extension MMPlayerLayer  {
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        if (gestureRecognizer == pinchGesture && otherGestureRecognizer == panGesture) || (gestureRecognizer == panGesture && otherGestureRecognizer == pinchGesture) {
+            return true
+        }
+        
+        return false
+    }
+}
+
